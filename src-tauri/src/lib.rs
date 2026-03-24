@@ -60,6 +60,19 @@ fn load_vault_file(name: String) -> Result<String, String> {
     Ok(decrypted)
 }
 
+#[tauri::command]
+fn delete_vault_file(name: String) -> Result<String, String> {
+    let mut path = get_vault_path()?;
+    path.push(format!("{}.vault", name));
+    
+    if path.exists() {
+        std::fs::remove_file(path).map_err(|e| e.to_string())?;
+        Ok(format!("FILE_DELETED: {}", name))
+    } else {
+        Err("File not found".into())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -67,7 +80,8 @@ pub fn run() {
             get_system_status,
             get_vault_files,
             save_vault_file,
-            load_vault_file
+            load_vault_file,
+            delete_vault_file // <-- COMMAND NOW REGISTERED
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
