@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from "react";
-// Direct import for local system access - will bypass browser sandboxing
 import { invoke } from "@tauri-apps/api/core";
 
 const CORE_RULES = [
@@ -30,11 +29,17 @@ const CORE_RULES = [
   "Track your habits daily",
 ];
 
-// Security obfuscation for the local storage key
-const scramble = (str: string) => btoa(str).split("").reverse().join("");
+async function hashKey(key: string) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(key);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return btoa(hashArray.map((b) => String.fromCharCode(b)).join(""));
+}
+
+const IDLE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
 function App() {
-  // --- AUTH STATE ---
   const [isLocked, setIsLocked] = useState(true);
   const [hasMasterKey, setHasMasterKey] = useState(
     () => !!localStorage.getItem("sanctuary_master_key"),
@@ -42,14 +47,12 @@ function App() {
   const [accessKey, setAccessKey] = useState("");
   const [authError, setAuthError] = useState(false);
 
-  // --- VAULT STATE ---
   const [journal, setJournal] = useState("");
   const [fileName, setFileName] = useState("untitled_log");
   const [fileList, setFileList] = useState<string[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isRulesExpanded, setIsRulesExpanded] = useState(false);
 
-  // --- MISSION STATE ---
   const [tasks, setTasks] = useState<
     { id: number; text: string; completed: boolean; critical: boolean }[]
   >(() => {
@@ -58,7 +61,39 @@ function App() {
   });
   const [newTask, setNewTask] = useState("");
 
-  // --- SYSTEM STATE ---
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const resetIdleTimer = () => {
+    if (idleTimer.current) {
+      clearTimeout(idleTimer.current);
+    }
+
+    idleTimer.current = setTimeout(() => {
+      setIsLocked(true);
+    }, IDLE_TIMEOUT);
+  };
+
+  useEffect(() => {
+    if (isLocked) return;
+
+    const events = ["mousemove", "keydown", "click"];
+
+    const handleActivity = () => {
+      resetIdleTimer();
+    };
+
+    events.forEach((event) => window.addEventListener(event, handleActivity));
+
+    resetIdleTimer();
+
+    return () => {
+      events.forEach((event) =>
+        window.removeEventListener(event, handleActivity),
+      );
+      if (idleTimer.current) clearTimeout(idleTimer.current);
+    };
+  }, [isLocked]);
+
   const [time, setTime] = useState(new Date());
   const [systemStatus, setSystemStatus] = useState("INITIALIZING...");
   const isInitialMount = useRef(true);
@@ -67,15 +102,6 @@ function App() {
     const timer = setInterval(() => {
       const now = new Date();
       setTime(now);
-      // Midnight Reset logic
-      if (
-        now.getHours() === 0 &&
-        now.getMinutes() === 0 &&
-        now.getSeconds() === 0
-      ) {
-        setTasks([]);
-        syncTasksToVault([]);
-      }
     }, 1000);
 
     const initSystem = async () => {
@@ -83,7 +109,6 @@ function App() {
         const status = await invoke("get_system_status");
         setSystemStatus(status as string);
 
-        // Handshake: Pull persistent task manifest from Rust
         try {
           const vaultTasksRaw = await invoke("load_vault_file", {
             name: "__tasks_manifest",
@@ -105,7 +130,6 @@ function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // Sync Mission state to both LocalStorage and Rust Backend
   useEffect(() => {
     localStorage.setItem("sanctuary_tasks", JSON.stringify(tasks));
     if (isInitialMount.current) {
@@ -122,7 +146,7 @@ function App() {
         content: JSON.stringify(currentTasks),
       });
     } catch (e) {
-      console.error("Mission sync failed.");
+      alert("Task sync failed.");
     }
   };
 
@@ -130,20 +154,35 @@ function App() {
     e.preventDefault();
     if (!accessKey.trim()) return;
     if (!hasMasterKey) {
-      localStorage.setItem("sanctuary_master_key", scramble(accessKey));
-      setHasMasterKey(true);
-      setIsLocked(false);
-      setAccessKey("");
+      hashKey(accessKey).then((hashed) => {
+        localStorage.setItem("sanctuary_master_key", hashed);
+        setHasMasterKey(true);
+        setIsLocked(false);
+        setAccessKey("");
+      });
     } else {
       const storedKey = localStorage.getItem("sanctuary_master_key");
-      if (storedKey && scramble(accessKey) === storedKey) {
-        setIsLocked(false);
-        setAuthError(false);
-        setAccessKey("");
-      } else {
-        setAuthError(true);
-        setAccessKey("");
-        setTimeout(() => setAuthError(false), 1000);
+      const scramble = (str: string) => btoa(str).split("").reverse().join("");
+
+      if (storedKey) {
+        hashKey(accessKey).then((hashed) => {
+          const isOldMatch = scramble(accessKey) === storedKey;
+          const isNewMatch = hashed === storedKey;
+
+          if (isNewMatch || isOldMatch) {
+            if (isOldMatch) {
+              localStorage.setItem("sanctuary_master_key", hashed);
+            }
+
+            setIsLocked(false);
+            setAuthError(false);
+            setAccessKey("");
+          } else {
+            setAuthError(true);
+            setAccessKey("");
+            setTimeout(() => setAuthError(false), 1000);
+          }
+        });
       }
     }
   };
@@ -156,12 +195,15 @@ function App() {
       );
       setFileList(filtered);
     } catch (e) {
-      console.error(e);
+      alert("Failed to fetch vault files.");
     }
   };
 
   const handleSaveFile = async () => {
-    if (!fileName.trim()) return;
+    if (!fileName.trim()) {
+      alert("Filename cannot be empty");
+      return;
+    }
     setIsSyncing(true);
     try {
       await invoke("save_vault_file", { name: fileName, content: journal });
@@ -169,6 +211,7 @@ function App() {
       setTimeout(() => setIsSyncing(false), 800);
     } catch (e) {
       setIsSyncing(false);
+      alert("Failed to save file.");
     }
   };
 
@@ -178,7 +221,7 @@ function App() {
       setJournal(content as string);
       setFileName(name);
     } catch (e) {
-      console.error(e);
+      alert("Failed to load file.");
     }
   };
 
@@ -192,7 +235,7 @@ function App() {
       }
       await refreshFileList();
     } catch (e) {
-      console.error(e);
+      alert("Failed to delete file.");
     }
   };
 
@@ -351,8 +394,8 @@ function App() {
       <header>
         <div className="header-meta">
           <div className="title-block">
-            <h1>Sanctuary // Version_1.2</h1>
-            <p>The only way out is through.</p>
+            <h1>Sanctuary // Version_1.3</h1>
+            <p>The fastest way out is always through.</p>
           </div>
           <button className="lock-btn" onClick={() => setIsLocked(true)}>
             Secure_Session
